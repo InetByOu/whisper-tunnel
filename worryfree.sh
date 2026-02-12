@@ -1,10 +1,10 @@
 #!/bin/bash
 # =============================================================================
-# worryfree.sh - Hysteria 2 Full One-Click Installer + Auto Update
+# worryfree.sh - Hysteria 2 Installer Compatible Ubuntu 24.04 (nftables)
 # Auth password OPSIONAL - default gstgg47e jika Enter kosong
-# Support: Ubuntu/Debian - Jalankan sebagai root
-# Fitur: apt auto update, deps full, port hopping 3000-19999, obfs salamander,
-#        self-signed cert, URI client siap pakai
+# Support: Ubuntu 24.04 LTS (Noble) - Jalankan sebagai root
+# Fitur: apt auto update, nftables persistent, port hopping 3000-19999 DNAT,
+#        obfs salamander, self-signed cert, URI client siap pakai
 # =============================================================================
 
 set -e
@@ -15,39 +15,37 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "\( {GREEN}=== worryfree.sh - Instalasi Hysteria 2 dimulai === \){NC}"
-echo -e "\( {YELLOW}Versi terbaru - Dibuat khusus untuk kemudahan tanpa worry \){NC}"
+echo -e "\( {GREEN}=== worryfree.sh - Instalasi Hysteria 2 dimulai (Ubuntu 24.04 compatible) === \){NC}"
+echo -e "\( {YELLOW}Menggunakan nftables untuk firewall & persistent rules (no ufw conflict) \){NC}"
 
-# 0. Cek OS (hanya Debian/Ubuntu)
-if ! grep -qiE 'debian|ubuntu' /etc/os-release; then
-    echo -e "\( {RED}Script ini hanya support Debian/Ubuntu-based. Keluar. \){NC}"
+# 0. Cek OS (Ubuntu/Debian, khusus 24.04+ recommended)
+if ! grep -qiE 'ubuntu|debian' /etc/os-release; then
+    echo -e "\( {RED}Script ini utama untuk Ubuntu/Debian. Keluar. \){NC}"
     exit 1
 fi
 
-# 1. Auto update & upgrade sistem + install dependencies otomatis
+# 1. Auto update & upgrade sistem + install dependencies minimal
 echo -e "\( {YELLOW}Auto update & upgrade paket sistem... \){NC}"
 apt update -y && apt upgrade -y && apt autoremove -y
 
-echo -e "\( {YELLOW}Install dependencies otomatis... \){NC}"
-apt install -y curl wget openssl iptables ufw jq net-tools iptables-persistent netfilter-persistent ca-certificates
+echo -e "\( {YELLOW}Install dependencies otomatis (nftables + tools)... \){NC}"
+apt install -y curl wget openssl nftables jq net-tools ca-certificates
 
 # 2. Install Hysteria 2 via script resmi (upgrade jika sudah ada)
 echo -e "\( {YELLOW}Install/Upgrade Hysteria 2 official... \){NC}"
 bash <(curl -fsSL https://get.hy2.sh/)
 
-# Pastikan binary ada
 if ! command -v hysteria &> /dev/null; then
-    echo -e "\( {RED}Gagal install Hysteria. Cek koneksi/internet. \){NC}"
+    echo -e "\( {RED}Gagal install Hysteria. Cek koneksi. \){NC}"
     exit 1
 fi
 
-# 3. Prompt konfigurasi (auth password opsional dengan default)
+# 3. Prompt konfigurasi
 echo -e "\( {YELLOW}Masukkan konfigurasi (tekan Enter untuk default): \){NC}"
 
 read -p "Port listen Hysteria (default: 5667): " HY_PORT
 HY_PORT=${HY_PORT:-5667}
 
-# Auth password: opsional, default gstgg47e jika kosong
 read -p "Password auth (default: gstgg47e, tekan Enter untuk default): " AUTH_PASS
 if [ -z "$AUTH_PASS" ]; then
     AUTH_PASS="gstgg47e"
@@ -65,7 +63,7 @@ SNI=${SNI:-graph.facebook.com}
 read -p "Up / Down Mbps (default: 100): " MBPS
 MBPS=${MBPS:-100}
 
-# 4. Generate self-signed cert (CN = SNI, valid 10 tahun)
+# 4. Generate self-signed cert
 CERT_DIR="/etc/hysteria"
 mkdir -p $CERT_DIR
 openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
@@ -76,7 +74,7 @@ openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
 chmod 600 $CERT_DIR/server.key
 echo -e "${GREEN}Self-signed cert dibuat (CN: \( SNI). \){NC}"
 
-# 5. Buat config.yaml lengkap
+# 5. Buat config Hysteria
 CONFIG_FILE="/etc/hysteria/config.yaml"
 
 cat > $CONFIG_FILE << EOF
@@ -109,9 +107,65 @@ log:
   level: info
 EOF
 
-echo -e "${GREEN}Config dibuat di: \( CONFIG_FILE \){NC}"
+echo -e "${GREEN}Config Hysteria dibuat di: \( CONFIG_FILE \){NC}"
 
-# 6. Restart & enable service
+# 6. Setup nftables persistent rules
+INTERFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
+if [ -z "$INTERFACE" ]; then
+    INTERFACE="eth0"  # fallback umum
+    echo -e "\( {YELLOW}Interface default tidak terdeteksi, pakai eth0 (ganti manual jika beda). \){NC}"
+fi
+
+NFT_CONF="/etc/nftables.conf"
+
+cat > $NFT_CONF << EOF
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy accept;
+        ct state established,related accept
+        iif lo accept
+        tcp dport 22 accept          # allow SSH (ganti jika port SSH beda)
+        udp dport $HY_PORT accept    # Hysteria internal port
+        udp dport 3000-19999 accept  # range hopping client
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy accept;
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        udp dport 3000-19999 dnat to :$HY_PORT
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "$INTERFACE" masquerade
+    }
+}
+EOF
+
+# Apply nftables config
+nft -f $NFT_CONF
+
+# Enable persistent load on boot
+systemctl enable nftables
+systemctl restart nftables
+
+echo -e "${GREEN}nftables setup selesai: allow SSH + Hysteria port + range 3000-19999, DNAT hopping via \( INTERFACE. \){NC}"
+echo -e "Cek rules: sudo nft list ruleset"
+
+# 7. Restart & enable Hysteria service
 systemctl daemon-reload
 systemctl restart hysteria-server
 systemctl enable hysteria-server --now
@@ -124,32 +178,7 @@ else
     exit 1
 fi
 
-# 7. Setup iptables DNAT permanen untuk port hopping (3000-19999 -> HY_PORT)
-INTERFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-if [ -z "$INTERFACE" ]; then
-    echo -e "\( {YELLOW}Interface default tidak terdeteksi. Setup iptables manual nanti. \){NC}"
-else
-    echo -e "${YELLOW}Setup iptables DNAT (range 3000-19999 -> $HY_PORT via \( INTERFACE) \){NC}"
-    iptables -t nat -F PREROUTING 2>/dev/null || true
-    iptables -t nat -A PREROUTING -i $INTERFACE -p udp --dport 3000:19999 -j DNAT --to-destination :$HY_PORT
-    iptables -t nat -A POSTROUTING -p udp -j MASQUERADE
-
-    # Simpan permanen
-    netfilter-persistent save
-    echo -e "\( {GREEN}Iptables disimpan permanen. \){NC}"
-fi
-
-# 8. Buka port di ufw jika aktif
-if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
-    ufw allow $HY_PORT/udp
-    ufw allow 3000:19999/udp
-    ufw reload
-    echo -e "${GREEN}UFW: Port \( HY_PORT + range 3000-19999/udp dibuka. \){NC}"
-else
-    echo -e "\( {YELLOW}UFW tidak aktif. Buka port manual via firewall VPS/provider. \){NC}"
-fi
-
-# 9. Buat URI client siap pakai
+# 8. Buat URI client
 SERVER_IP=$(curl -s ifconfig.me || echo "your-server-ip")
 URI="hysteria2://\( {AUTH_PASS}@ \){SERVER_IP}:\( {HY_PORT}/?obfs=salamander&obfs-password= \){OBFS_PASS}&sni=${SNI}&insecure=1"
 
@@ -159,19 +188,20 @@ if [ ! -z "$DOMAIN" ]; then
 fi
 
 echo ""
-echo -e "\( {GREEN}=== Instalasi worryfree.sh Selesai! === \){NC}"
+echo -e "\( {GREEN}=== Instalasi worryfree.sh Selesai! (nftables mode) === \){NC}"
 echo -e "Server IP/Domain     : ${DOMAIN:-$SERVER_IP}"
 echo -e "Port internal        : $HY_PORT"
-echo -e "Range hopping client : 3000-19999"
+echo -e "Range hopping client : 3000-19999 (DNAT otomatis)"
 echo -e "Auth password        : $AUTH_PASS"
 echo -e "Obfs password        : $OBFS_PASS"
 echo -e "SNI                  : $SNI"
 echo ""
-echo -e "\( {YELLOW}URI client (copy ke Hiddify/NekoBox/Android): \){NC}"
+echo -e "\( {YELLOW}URI client (copy ke Hiddify/NekoBox): \){NC}"
 echo "$URI"
 echo ""
 echo -e "\( {YELLOW}Untuk full hopping: Ganti port di URI jadi :3000-19999 \){NC}"
-echo -e "Cek status/log   : systemctl status hysteria-server   atau   journalctl -u hysteria-server -e -f"
+echo -e "Cek nftables     : sudo nft list ruleset"
+echo -e "Cek Hysteria log : journalctl -u hysteria-server -e -f"
 echo -e "Update Hysteria  : bash <(curl -fsSL https://get.hy2.sh/)"
 echo ""
-echo -e "\( {GREEN}Semua sudah worryfree sekarang! Selamat menikmati koneksi cepat & aman dari Bandung. \){NC}"
+echo -e "\( {GREEN}Semua worryfree di Ubuntu 24.04! Jika perlu allow port SSH lain atau IPv6, edit /etc/nftables.conf lalu sudo nft -f /etc/nftables.conf \){NC}"
