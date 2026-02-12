@@ -21,7 +21,7 @@ rm -rf /etc/hysteria
 rm -f /usr/local/bin/hysteria
 rm -f /etc/systemd/system/hysteria-server.service
 
-# Hapus aturan DNAT lama (hardcoded port 5667)
+# Hapus aturan DNAT lama
 IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
 [ -z "$IFACE" ] && IFACE="eth0"
 iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 3000:19999 -j DNAT --to-destination :5667 2>/dev/null || true
@@ -108,10 +108,25 @@ log:
 EOF
 echo "config.yaml created."
 
+# ================ VALIDASI KONFIGURASI ================
+echo "Validating Hysteria configuration..."
+if /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml --test-only 2>/dev/null; then
+    echo "Configuration is valid."
+else
+    echo "ERROR: Hysteria configuration is invalid."
+    exit 1
+fi
+
 # ================ DETEKSI INTERFACE ================
 IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
 [ -z "$IFACE" ] && IFACE="eth0"
 echo "Using network interface: $IFACE"
+
+# ================ CEK KETERSEDIAAN PORT ================
+echo "Checking if port 5667 is available..."
+if ss -uln | grep -q ":5667 "; then
+    echo "WARNING: Port 5667 is already in use. Attempting to continue anyway..."
+fi
 
 # ================ IPTABLES DNAT ================
 echo "[8/9] Adding DNAT rule for port hopping..."
@@ -139,11 +154,29 @@ fi
 systemctl daemon-reload
 systemctl enable hysteria-server
 systemctl restart hysteria-server
-sleep 2
+
+# Beri waktu untuk start
+sleep 3
+
+# Cek status dengan detail
 if systemctl is-active --quiet hysteria-server; then
     echo "Hysteria service is running."
 else
-    echo "Error: Hysteria service failed to start."
+    echo "ERROR: Hysteria service failed to start."
+    echo "--- Last 20 lines of journal ---"
+    journalctl -u hysteria-server -n 20 --no-pager
+    echo ""
+    echo "--- Checking binary and permissions ---"
+    ls -la /usr/local/bin/hysteria
+    file /usr/local/bin/hysteria
+    echo ""
+    echo "--- Checking config file ---"
+    cat /etc/hysteria/config.yaml | grep -v password
+    echo ""
+    echo "--- Checking if port is already in use ---"
+    ss -ulpn | grep 5667 || echo "Port 5667 is free"
+    echo ""
+    echo "Please fix the error manually and run: systemctl restart hysteria-server"
     exit 1
 fi
 
