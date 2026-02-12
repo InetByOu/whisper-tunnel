@@ -48,11 +48,10 @@ fi
 iptables -t nat -D PREROUTING -i "$INTERFACE" -p udp --dport 3000:19999 -j DNAT --to-destination :5667 2>/dev/null || true
 iptables -t nat -D PREROUTING -i "$INTERFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || true
 
-# Disable UFW dulu untuk cleanup
+# Reset UFW sepenuhnya
+echo "Resetting UFW..."
 ufw --force disable 2>/dev/null || true
-
-# Reset UFW
-echo "y" | ufw reset 2>/dev/null || true
+ufw --force reset 2>/dev/null || true
 
 echo "Cleanup completed."
 
@@ -160,24 +159,28 @@ fi
 # ==================== CONFIGURE UFW ====================
 echo "[10/16] Configuring UFW firewall..."
 
+# Pastikan UFW dalam keadaan reset
+ufw --force disable
+ufw --force reset
+
 # Set default policies
 ufw default deny incoming
 ufw default allow outgoing
 
-# Allow SSH
-ufw allow 22/tcp
+# Allow SSH (port 22) - gunakan sintaks panjang
+ufw allow proto tcp to any port 22 comment 'SSH'
 
 # Allow Hysteria main port
-ufw allow $HY_PORT/udp
+ufw allow proto udp to any port $HY_PORT comment 'Hysteria main port'
 
-# Allow port hopping range - PASTIKAN FORMATNYA BENAR
-ufw allow 3000:19999/udp
+# Allow port hopping range 3000-19999 - gunakan sintaks panjang
+ufw allow proto udp to any port 3000:19999 comment 'Hysteria port hopping'
 
-# Enable UFW - paksa dengan 'yes'
+# Enable UFW
 ufw --force enable
 
-# Status UFW
-ufw status
+# Tampilkan status
+ufw status verbose
 
 echo "UFW configured successfully."
 
@@ -237,9 +240,15 @@ fi
 read -p "Enter domain name (optional, press Enter to use IP $PUBLIC_IP): " DOMAIN
 SERVER_ADDR=${DOMAIN:-$PUBLIC_IP}
 
-# Simple URL encode
-OBFS_PASS_ENCODED=$(echo -n "$OBFS_PASS" | od -An -tx1 | tr ' ' % | tr -d '\n')
-AUTH_PASS_ENCODED=$(echo -n "$AUTH_PASS" | od -An -tx1 | tr ' ' % | tr -d '\n')
+# URL encode password menggunakan jq (jika tersedia)
+if command -v jq >/dev/null 2>&1; then
+    OBFS_PASS_ENCODED=$(printf "%s" "$OBFS_PASS" | jq -sRr @uri)
+    AUTH_PASS_ENCODED=$(printf "%s" "$AUTH_PASS" | jq -sRr @uri)
+else
+    # Fallback sederhana
+    OBFS_PASS_ENCODED=$(echo -n "$OBFS_PASS" | od -An -tx1 | tr ' ' % | tr -d '\n' | tr '[:upper:]' '[:lower:]')
+    AUTH_PASS_ENCODED=$(echo -n "$AUTH_PASS" | od -An -tx1 | tr ' ' % | tr -d '\n' | tr '[:upper:]' '[:lower:]')
+fi
 
 # Generate URIs
 URI="hysteria2://$AUTH_PASS_ENCODED@$SERVER_ADDR:$HY_PORT?insecure=1&obfs=salamander&obfs-password=$OBFS_PASS_ENCODED&sni=$SNI"
