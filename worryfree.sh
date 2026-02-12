@@ -16,7 +16,7 @@ echo "OK: Running as root."
 echo "[2/16] Cleaning up existing Hysteria 2 installation..."
 
 # Stop and disable service
-if systemctl list-unit-files | grep -q hysteria-server; then
+if systemctl list-unit-files 2>/dev/null | grep -q hysteria-server; then
     echo "Stopping and disabling hysteria-server service..."
     systemctl stop hysteria-server 2>/dev/null || true
     systemctl disable hysteria-server 2>/dev/null || true
@@ -41,7 +41,7 @@ if command -v nft >/dev/null 2>&1; then
 fi
 
 # Restart nftables service if exists
-if systemctl list-unit-files | grep -q nftables; then
+if systemctl list-unit-files 2>/dev/null | grep -q nftables; then
     systemctl restart nftables 2>/dev/null || true
 fi
 
@@ -193,7 +193,7 @@ table ip nat {
         type nat hook postrouting priority srcnat; policy accept;
         
         # Masquerade for outgoing traffic
-        oif $INTERFACE masquerade
+        oif "$INTERFACE" masquerade
     }
 }
 EOF
@@ -201,7 +201,7 @@ echo "nftables configuration created at /etc/nftables.conf"
 
 # ==================== APPLY NFTABLES ====================
 echo "[11/16] Applying nftables rules..."
-nft -f /etc/nftables.conf || { echo "Error: Failed to apply nftables rules."; exit 1; }
+nft -f /etc/nftables.conf || { echo "Error: Failed to apply nftables rules. Check /etc/nftables.conf for syntax errors."; exit 1; }
 echo "nftables rules applied successfully."
 
 # ==================== ENABLE NFTABLES ====================
@@ -230,29 +230,57 @@ fi
 echo "[15/16] Generating client connection URI..."
 
 # Get public IP
-PUBLIC_IP=$(curl -s ifconfig.me)
+PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me || true)
 if [ -z "$PUBLIC_IP" ]; then
-    PUBLIC_IP=$(curl -s icanhazip.com)
+    PUBLIC_IP=$(curl -s --connect-timeout 5 icanhazip.com || true)
 fi
 if [ -z "$PUBLIC_IP" ]; then
-    PUBLIC_IP=$(ip -4 addr show $INTERFACE | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+    PUBLIC_IP=$(curl -s --connect-timeout 5 ipinfo.io/ip || true)
+fi
+if [ -z "$PUBLIC_IP" ]; then
+    PUBLIC_IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+fi
+if [ -z "$PUBLIC_IP" ]; then
+    PUBLIC_IP="YOUR_SERVER_IP"
+    echo "Warning: Could not detect public IP. Please replace YOUR_SERVER_IP manually."
 fi
 
 # Prompt for domain
 read -p "Enter domain name (optional, press Enter to use IP $PUBLIC_IP): " DOMAIN
 SERVER_ADDR=${DOMAIN:-$PUBLIC_IP}
 
-# Generate URI
-URI="hysteria2://$AUTH_PASS@$SERVER_ADDR:$HY_PORT?insecure=1&obfs=salamander&obfs-password=$OBFS_PASS&sni=$SNI"
-URI_HOPPING="hysteria2://$AUTH_PASS@$SERVER_ADDR:3000-19999?insecure=1&obfs=salamander&obfs-password=$OBFS_PASS&sni=$SNI"
+# Generate URI (URL encode obfs password)
+OBFS_PASS_ENCODED=$(printf "%s" "$OBFS_PASS" | jq -sRr @uri)
+AUTH_PASS_ENCODED=$(printf "%s" "$AUTH_PASS" | jq -sRr @uri)
+
+URI="hysteria2://$AUTH_PASS_ENCODED@$SERVER_ADDR:$HY_PORT?insecure=1&obfs=salamander&obfs-password=$OBFS_PASS_ENCODED&sni=$SNI"
+URI_HOPPING="hysteria2://$AUTH_PASS_ENCODED@$SERVER_ADDR:3000-19999?insecure=1&obfs=salamander&obfs-password=$OBFS_PASS_ENCODED&sni=$SNI"
 
 echo "Client URI generated."
 
+# ==================== VALIDATE CONFIGURATION ====================
+echo "[16/16] Validating installation..."
+
+# Test Hysteria config
+if /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml --disable-update-check --log-level error --test-only 2>/dev/null; then
+    echo "Hysteria configuration is valid."
+else
+    echo "Warning: Hysteria configuration test failed. Please check /etc/hysteria/config.yaml"
+fi
+
+# Test nftables rules
+if nft list table ip nat >/dev/null 2>&1; then
+    echo "nftables NAT rules are active."
+else
+    echo "Warning: nftables NAT table not found. Rules may not be applied correctly."
+fi
+
 # ==================== SUMMARY ====================
-echo "[16/16] Installation Summary"
+echo ""
 echo "================================================"
 echo "Hysteria 2 has been successfully installed!"
 echo "================================================"
+echo ""
 echo "Server Information:"
 echo "  Address: $SERVER_ADDR"
 echo "  Port (standard): $HY_PORT"
@@ -267,18 +295,38 @@ echo "Client Connection URIs:"
 echo "  Standard port:"
 echo "  $URI"
 echo ""
-echo "  Port hopping (recommended):"
+echo "  Port hopping (recommended - use any port from 3000-19999):"
 echo "  $URI_HOPPING"
 echo ""
 echo "Useful Commands:"
 echo "  Check nftables rules: nft list ruleset"
 echo "  Check Hysteria status: systemctl status hysteria-server"
-echo "  View Hysteria logs: journalctl -u hysteria-server -f"
+echo "  View Hysteria logs: journalctl -u hysteria-server -f -n 50"
 echo "  Edit config: nano /etc/hysteria/config.yaml"
 echo "  Restart Hysteria: systemctl restart hysteria-server"
+echo "  Test Hysteria config: /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml --test-only"
 echo ""
 echo "Port hopping: Clients can use any port between 3000-19999"
-echo "All ports will be redirected to your Hysteria port $HY_PORT"
+echo "All ports in this range will be redirected to your Hysteria port $HY_PORT"
+echo ""
+echo "Installation directory: /etc/hysteria/"
+echo "Config file: /etc/hysteria/config.yaml"
+echo "Certificate: /etc/hysteria/server.crt"
+echo "================================================"
+
+# ==================== TEST CONNECTION ====================
+echo ""
+echo "Quick test: Checking if Hysteria port is open..."
+if command -v ss >/dev/null 2>&1; then
+    if ss -uln | grep -q ":$HY_PORT "; then
+        echo "✓ Port $HY_PORT is listening (UDP)"
+    else
+        echo "✗ Port $HY_PORT is NOT listening. Check Hysteria service."
+    fi
+fi
+
+echo ""
+echo "Installation complete! Use the URI above to connect your clients."
 echo "================================================"
 
 exit 0
